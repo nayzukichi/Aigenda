@@ -45,7 +45,18 @@ The model ships pre-trained (`rf_model.joblib`). To rebuild it from the survey: 
 | UC-10 Goals (optional) | Target date (past dates rejected), max 10 goals, +10% progress |
 | UC-11 AI Study Support (optional) | Tips, resource links (educational only), time-management advice, topic chips and a question box; general tips when data is thin |
 
-Not in this version: a "late night" focus option, meal-time inputs, a week-grid schedule, and subject due dates (all shown in the deck mockups). The scheduler plans one day at a time.
+## Weekly plan (new)
+
+Every 7 days AIgenda asks for the coming week: for each day, the **subjects** the student has (optional class start/end) and their **vacant time**.
+
+- `GET /api/weekly/status` returns `needs_prompt` (true when there is no plan, or 7 days have passed since the last one), `next_prompt_on`, and last week's plan so the form can prefill by weekday. The frontend opens **Weekly Plan** automatically when it is true and shows a dashboard banner.
+- `PUT /api/weekly/plan` saves the 7 days (table `weekly_plans`) and generates a schedule for each day. The response lists, per day, any subject that did not fit (`report[].unplaced`).
+- `GET /api/schedule/week` returns all scheduled days; **My Schedule** has a tab per day.
+- Study and hobby blocks are placed only inside the vacant windows (no windows = any free hour). A day with no subjects entered falls back to the ranked subject list.
+
+**Bug fix:** the scheduler gave the top subjects two blocks each and ran out of free hours after about 4 subjects, so the rest got nothing. Now every subject gets one block first, spare hours then go to second blocks, and anything that still cannot fit is reported to the student instead of silently dropped. Random Forest scoring is also batched (one model call per day), so generating a week takes about a second. Run `python test_scheduler.py` to check this without a database.
+
+Not in this version: a "late night" focus option, meal-time inputs and subject due dates (all shown in the deck mockups).
 
 ## How the model learns from the database
 1. Students fill in habits, hobbies and ranked subjects, then generate a schedule (`schedule_items`; study rows store the subject rank).

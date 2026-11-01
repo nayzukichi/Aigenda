@@ -108,3 +108,15 @@ CREATE TABLE IF NOT EXISTS model_runs (
   test_accuracy DECIMAL(5,3) NULL,
   test_auc      DECIMAL(5,3) NULL
 ) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;
+
+-- Weekly plan: every 7 days the student enters, per day, the subjects they have and their vacant time.
+-- data = JSON {"subjects":[{"name","start","end"}], "vacant":[{"start","end"}]}; created_on = day the plan was submitted.
+CREATE TABLE IF NOT EXISTS weekly_plans (
+  user_id    INT NOT NULL,
+  day        DATE NOT NULL,
+  data       TEXT NOT NULL,
+  created_on DATE NOT NULL,
+  PRIMARY KEY (user_id, day),
+  INDEX idx_weekly_created (user_id, created_on),
+  FOREIGN KEY (user_id) REFERENCES users(id) ON DELETE CASCADE
+) ENGINE=InnoDB DEFAULT CHARSET=utf8mb4;

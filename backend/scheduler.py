@@ -4,37 +4,84 @@ from typing import Callable, Optional
 PEAK = {"morning": (8, 12), "afternoon": (13, 17), "evening": (18, 22)}
 
 
-def generate(h: dict, subjects: list[dict], hobbies: list[str],
-             scorer: Optional[Callable[[int, int, int], float]] = None) -> list[dict]:
-    """h: wake, sleep, cs, ce, chrono. subjects: [{name, rank}]. Returns [{hour,label,kind}]."""
-    ps, pe = PEAK[h["chrono"]]
-    blocks: dict[int, tuple[str, str]] = {h["wake"]: ("Wake · Breakfast", "rest")}
-    for i in range(h["cs"], h["ce"]):
-        blocks[i] = ("Classes", "class")
-    blocks.setdefault(h["ce"], ("Lunch", "rest"))
-    blocks.setdefault(18, ("Dinner", "rest"))
-    blocks[h["sleep"] - 1] = ("Wind down", "rest")
+def _place_meal(blocks: dict, prefs: list[int], label: str, lo: int, hi: int) -> None:
+    """Put a meal on the first preferred hour that is still free (lo < hour < hi)."""
+    for hr in prefs:
+        if lo < hr < hi and hr not in blocks:
+            blocks[hr] = (label, "rest")
+            return
 
-    free = [i for i in range(h["wake"] + 1, h["sleep"] - 1) if i not in blocks]
+
+def plan_day(h: dict, subjects: list[dict], hobbies: list[str],
+             scorer: Optional[Callable[[int, int, int], float]] = None,
+             classes: Optional[list[tuple[int, int, str]]] = None,
+             vacant: Optional[list[tuple[int, int]]] = None) -> tuple[list[dict], list[str]]:
+    """Plan ONE day.
+
+    h: wake, sleep, cs, ce, chrono.  subjects: [{name, rank}] to study today.
+    classes: [(start, end, label)] class hours for this day (default: the habit profile's cs..ce).
+    vacant:  [(start, end)] hours the student says are free; study/hobby blocks are only placed inside them.
+             None = every hour between wake-up and bedtime that is not busy.
+    Returns (blocks, unplaced) where unplaced = subjects that got no study block because the day is full.
+    """
+    ps, pe = PEAK[h["chrono"]]
+    wake, sleep = h["wake"], h["sleep"]
+    legacy = classes is None
+    if legacy:
+        classes = [(h["cs"], h["ce"], "Classes")]
+
+    blocks: dict[int, tuple[str, str]] = {wake: ("Wake · Breakfast", "rest")}
+    for s, e, label in classes:
+        for i in range(s, e):
+            if wake <= i < sleep:
+                blocks[i] = (label, "class")
+    _place_meal(blocks, [h["ce"], 12, 13] if legacy else [12, 13, 11, 14], "Lunch", wake, sleep - 1)
+    _place_meal(blocks, [18, 19, 17], "Dinner", wake, sleep - 1)
+    blocks[sleep - 1] = ("Wind down", "rest")
+
+    free = [i for i in range(wake + 1, sleep - 1) if i not in blocks]
+    if vacant is not None:
+        free = [i for i in free if any(s <= i < e for s, e in vacant)]
+
     subs = sorted(subjects, key=lambda s: s["rank"])
     n = len(subs)
 
-    # Higher-ranked subjects get more study blocks (max 2)
-    wanted = [(s["name"], s["rank"]) for i, s in enumerate(subs) for _ in range(max(1, min(2, n - i)))]
+    # Keep one slot for a hobby, but only once every subject can still get its own block.
+    reserve = 1 if hobbies and len(free) > n else 0
+    budget = max(0, len(free) - reserve)
+
+    # Random Forest P(complete) for every (free hour, subject rank), fetched in a single batched call when possible.
+    rf: dict = {}
+    if scorer and free and subs:
+        combos = [(i, int(ps <= i < pe), r) for i in free for r in {s["rank"] for s in subs}]
+        rf = scorer.batch(combos) if hasattr(scorer, "batch") else {c: scorer(*c) for c in combos}
 
     def score(hour: int, rank: int) -> float:
         in_peak = int(ps <= hour < pe)
         base = in_peak + 0.01 * (24 - hour)                 # rule-based: peak first, earlier is better
-        return base + (scorer(hour, in_peak, rank) if scorer else 0.0)  # + Random Forest P(complete)
+        if hour >= sleep - 2:
+            base -= 0.5                                      # avoid the last hours before bed unless nothing else is left
+        return base + rf.get((hour, in_peak, rank), 0.0)     # + Random Forest P(complete)
 
     meta: dict[int, int] = {}                                # hour -> subject rank (study blocks)
-    for name, rank in wanted:
-        cand = [i for i in free if i not in blocks and i < h["sleep"] - 2]
-        if not cand:
-            break
-        best = max(cand, key=lambda i: score(i, rank))
-        blocks[best] = (name, "study")
-        meta[best] = rank
+    placed: set[str] = set()
+
+    def put(s: dict) -> bool:
+        cand = [i for i in free if i not in blocks]
+        if not cand or len(meta) >= budget:
+            return False
+        best = max(cand, key=lambda i: score(i, s["rank"]))
+        blocks[best] = (s["name"], "study")
+        meta[best] = s["rank"]
+        placed.add(s["name"])
+        return True
+
+    # Pass 1: EVERY subject gets one block, highest rank first (this is what used to run out after ~4 subjects).
+    for s in subs:
+        put(s)
+    # Pass 2: spare hours go to a second block for higher-ranked subjects (all but the lowest-ranked one).
+    for s in subs[:-1]:
+        put(s)
 
     rest = [i for i in free if i not in blocks]
     for j, i in enumerate(rest[-len(hobbies):] if hobbies else []):
@@ -42,12 +89,20 @@ def generate(h: dict, subjects: list[dict], hobbies: list[str],
     for i in free:
         blocks.setdefault(i, ("Free time · Rest", "rest"))
 
-    return [{"hour": i, "label": blocks[i][0], "kind": blocks[i][1], "rank": meta.get(i),
-             "in_peak": int(ps <= i < pe)} for i in sorted(blocks)]
+    out = [{"hour": i, "label": blocks[i][0], "kind": blocks[i][1], "rank": meta.get(i),
+            "in_peak": int(ps <= i < pe)} for i in sorted(blocks)]
+    return out, [s["name"] for s in subs if s["name"] not in placed]
+
+
+def generate(h: dict, subjects: list[dict], hobbies: list[str],
+             scorer: Optional[Callable[[int, int, int], float]] = None) -> list[dict]:
+    """Backwards-compatible wrapper: one day from the habit profile. Returns [{hour,label,kind}]."""
+    return plan_day(h, subjects, hobbies, scorer)[0]
 
 
 def n_study_blocks(n_subjects: int) -> int:
-    return sum(max(1, min(2, n_subjects - i)) for i in range(n_subjects))
+    """Rough planned load before a day is built (used only as a model input estimate, capped at a realistic day)."""
+    return min(8, sum(max(1, min(2, n_subjects - i)) for i in range(n_subjects)))
 
 
 def tips(h: dict, subjects: list[dict], hobbies: list[str], progress: Optional[dict] = None) -> list[str]:

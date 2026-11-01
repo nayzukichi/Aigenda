@@ -62,8 +62,21 @@ def scorer_from(bundle, overrides=None):
     if bundle is None:
         return None
     d, clf = {**bundle["defaults"], **(overrides or {})}, bundle["model"]
-    return lambda hour, in_peak, prio: float(clf.predict_proba(
-        [[hour, in_peak, prio, d["day_load"], d["adherence"], d["distraction"], d["stress_sleep"]]])[0][1])
+    row = lambda hour, in_peak, prio: [hour, in_peak, prio, d["day_load"], d["adherence"], d["distraction"], d["stress_sleep"]]
+
+    def score(hour, in_peak, prio):
+        return float(clf.predict_proba([row(hour, in_peak, prio)])[0][1])
+
+    def batch(combos):
+        """Score many (hour, in_peak, priority) combos in ONE model call (a week of schedules needs hundreds)."""
+        combos = list(combos)
+        if not combos:
+            return {}
+        proba = clf.predict_proba([row(*c) for c in combos])[:, 1]
+        return {c: float(p) for c, p in zip(combos, proba)}
+
+    score.batch = batch
+    return score
 
 
 def retrain_from_rows(rows, min_rows=200, real_weight=5.0, seed=42):
